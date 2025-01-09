@@ -354,7 +354,7 @@ _QuadSliceType: te.TypeAlias = tuple[
                 list[_SubjectType] | tuple[_SubjectType, ...] | _SubjectType | None,
                 list[_PredicateType] | tuple[_PredicateType, ...] | _PredicateType | None,
                 list[_ObjectType] | tuple[_ObjectType, ...] | _ObjectType | None,
-                list["_ContextType"] | tuple["_ContextType", ...] | "_ContextType" | None,
+                list[_ContextIdentifierType] | tuple[_ContextIdentifierType, ...] | _ContextIdentifierType | None,
 ]
 
 _GraphT = TypeVar("_GraphT", bound="Graph")
@@ -1637,12 +1637,6 @@ class Graph(Node):
         initBindings = initBindings or {}  # noqa: N806
         initNs = initNs or dict(self.namespaces())  # noqa: N806
 
-        if self.default_union:
-            query_graph = "__UNION__"
-        elif isinstance(self, ConjunctiveGraph):
-            query_graph = self.default_context.identifier
-        else:
-            query_graph = self.identifier
         if hasattr(self.store, "query") and use_store_provided:
             try:
                 return self.store.query(
@@ -2139,227 +2133,227 @@ class UnSupportedAggregateOperation(Exception):  # noqa: N818
         return "This operation is not supported by ReadOnlyGraphAggregate " "instances"
 
 
-class ReadOnlyGraphAggregate(ConjunctiveGraph):
-    """Utility class for treating a set of graphs as a single graph
-
-    Only read operations are supported (hence the name). Essentially a
-    ConjunctiveGraph over an explicit subset of the entire store.
-    """
-
-    def __init__(self, graphs: list[Graph], store: Union[str, Store] = "default"):
-        if store is not None:
-            super(ReadOnlyGraphAggregate, self).__init__(store)
-            Graph.__init__(self, store)
-            self.__namespace_manager = None
-
-        assert (
-            isinstance(graphs, list)
-            and graphs
-            and [g for g in graphs if isinstance(g, Graph)]
-        ), "graphs argument must be a list of Graphs!!"
-        self.graphs = graphs
-
-    def __repr__(self) -> str:
-        return "<ReadOnlyGraphAggregate: %s graphs>" % len(self.graphs)
-
-    def destroy(self, configuration: str) -> NoReturn:
-        raise ModificationException()
-
-    # Transactional interfaces (optional)
-    def commit(self) -> NoReturn:
-        raise ModificationException()
-
-    def rollback(self) -> NoReturn:
-        raise ModificationException()
-
-    def open(self, configuration: str, create: bool = False) -> None:
-        # TODO: is there a use case for this method?
-        for graph in self.graphs:
-            # type error: Too many arguments for "open" of "Graph"
-            # type error: Argument 1 to "open" of "Graph" has incompatible type "ReadOnlyGraphAggregate"; expected "str"  [arg-type]
-            # type error: Argument 2 to "open" of "Graph" has incompatible type "str"; expected "bool"  [arg-type]
-            graph.open(self, configuration, create)  # type: ignore[call-arg, arg-type]
-
-    # type error: Signature of "close" incompatible with supertype "Graph"
-    def close(self) -> None:  # type: ignore[override]
-        for graph in self.graphs:
-            graph.close()
-
-    def add(self, triple: _TripleOrOptionalQuadType) -> NoReturn:
-        raise ModificationException()
-
-    def addN(self, quads: Iterable[_QuadType]) -> NoReturn:  # noqa: N802
-        raise ModificationException()
-
-    # type error: Argument 1 of "remove" is incompatible with supertype "Graph"; supertype defines the argument type as "tuple[Optional[Node], Optional[Node], Optional[Node]]"
-    def remove(self, triple: _TripleOrOptionalQuadType) -> NoReturn:  # type: ignore[override]
-        raise ModificationException()
-
-    # type error: Signature of "triples" incompatible with supertype "ConjunctiveGraph"
-    @overload  # type: ignore[override]
-    def triples(
-        self,
-        triple: _TriplePatternType,
-    ) -> Generator[_TripleType, None, None]: ...
-
-    @overload
-    def triples(
-        self,
-        triple: _TriplePathPatternType,
-    ) -> Generator[_TriplePathType, None, None]: ...
-
-    @overload
-    def triples(
-        self,
-        triple: _TripleSelectorType,
-    ) -> Generator[_TripleOrTriplePathType, None, None]: ...
-
-    def triples(
-        self,
-        triple: _TripleSelectorType,
-    ) -> Generator[_TripleOrTriplePathType, None, None]:
-        s, p, o = triple
-        for graph in self.graphs:
-            if isinstance(p, Path):
-                for s, o in p.eval(self, s, o):
-                    yield s, p, o
-            else:
-                for s1, p1, o1 in graph.triples((s, p, o)):
-                    yield s1, p1, o1
-
-    def __contains__(self, triple_or_quad: _TripleOrQuadSelectorType) -> bool:
-        context = None
-        if len(triple_or_quad) == 4:
-            # type error: Tuple index out of range
-            context = triple_or_quad[3]  # type: ignore [misc, unused-ignore]
-        for graph in self.graphs:
-            if context is None or graph.identifier == context.identifier:
-                if triple_or_quad[:3] in graph:
-                    return True
-        return False
-
-    # type error: Signature of "quads" incompatible with supertype "ConjunctiveGraph"
-    def quads(  # type: ignore[override]
-        self, triple_or_quad: _TripleOrQuadSelectorType
-    ) -> Generator[
-        tuple[_SubjectType, Path | _PredicateType, _ObjectType, _ContextType],
-        None,
-        None,
-    ]:
-        """Iterate over all the quads in the entire aggregate graph"""
-        c = None
-        if len(triple_or_quad) == 4:
-            s, p, o, c = triple_or_quad
-        else:
-            s, p, o = triple_or_quad[:3]
-
-        if c is not None:
-            for graph in [g for g in self.graphs if g == c]:
-                for s1, p1, o1 in graph.triples((s, p, o)):
-                    yield s1, p1, o1, graph
-        else:
-            for graph in self.graphs:
-                for s1, p1, o1 in graph.triples((s, p, o)):
-                    yield s1, p1, o1, graph
-
-    def __len__(self) -> int:
-        return sum(len(g) for g in self.graphs)
-
-    def __hash__(self) -> NoReturn:
-        raise UnSupportedAggregateOperation()
-
-    def __cmp__(self, other) -> int:
-        if other is None:
-            return -1
-        elif isinstance(other, Graph):
-            return -1
-        elif isinstance(other, ReadOnlyGraphAggregate):
-            return (self.graphs > other.graphs) - (self.graphs < other.graphs)
-        else:
-            return -1
-
-    def __iadd__(self: _GraphT, other: Iterable[_TripleType]) -> NoReturn:
-        raise ModificationException()
-
-    def __isub__(self: _GraphT, other: Iterable[_TripleType]) -> NoReturn:
-        raise ModificationException()
-
-    # Conv. methods
-
-    def triples_choices(
-        self,
-        triple: (
-            tuple[
-                list[_SubjectType] | tuple[_SubjectType, ...],
-                _PredicateType,
-                _ObjectType | None,
-            ]
-            | tuple[
-                _SubjectType | None,
-                list[_PredicateType] | tuple[_PredicateType, ...],
-                _ObjectType | None,
-            ]
-            | tuple[
-                _SubjectType | None,
-                _PredicateType,
-                list[_ObjectType] | tuple[_ObjectType, ...],
-            ]
-        ),
-        context: _ContextType | None = None,
-    ) -> Generator[_TripleType, None, None]:
-        subject, predicate, object_ = triple
-        for graph in self.graphs:
-            # type error: Argument 1 to "triples_choices" of "Graph" has incompatible type "tuple[Union[list[Node], Node], Union[Node, list[Node]], Union[Node, list[Node]]]"; expected "Union[tuple[list[Node], Node, Node], tuple[Node, list[Node], Node], tuple[Node, Node, list[Node]]]"
-            # type error note: unpacking discards type info
-            choices = graph.triples_choices((subject, predicate, object_))  # type: ignore[arg-type]
-            for s, p, o in choices:
-                yield s, p, o
-
-    def qname(self, uri: str) -> str:
-        if hasattr(self, "namespace_manager") and self.namespace_manager:
-            return self.namespace_manager.qname(uri)
-        raise UnSupportedAggregateOperation()
-
-    def compute_qname(self, uri: str, generate: bool = True) -> tuple[str, URIRef, str]:
-        if hasattr(self, "namespace_manager") and self.namespace_manager:
-            return self.namespace_manager.compute_qname(uri, generate)
-        raise UnSupportedAggregateOperation()
-
-    # type error: Signature of "bind" incompatible with supertype "Graph"
-    def bind(  # type: ignore[override]
-        self, prefix: str | None, namespace: Any, override: bool = True  # noqa: F811
-    ) -> NoReturn:
-        raise UnSupportedAggregateOperation()
-
-    def namespaces(self) -> Generator[tuple[str, URIRef], None, None]:
-        if hasattr(self, "namespace_manager"):
-            for prefix, namespace in self.namespace_manager.namespaces():
-                yield prefix, namespace
-        else:
-            for graph in self.graphs:
-                for prefix, namespace in graph.namespaces():
-                    yield prefix, namespace
-
-    def absolutize(self, uri: str, defrag: int = 1) -> NoReturn:
-        raise UnSupportedAggregateOperation()
-
-    # type error: Signature of "parse" incompatible with supertype "ConjunctiveGraph"
-    def parse(  # type: ignore[override]
-        self,
-        source: (
-            IO[bytes] | TextIO | InputSource | str | bytes | pathlib.PurePath | None
-        ),
-        publicID: str | None = None,  # noqa: N803
-        format: str | None = None,
-        **args: Any,
-    ) -> NoReturn:
-        raise ModificationException()
-
-    def n3(self, namespace_manager: NamespaceManager | None = None) -> NoReturn:
-        raise UnSupportedAggregateOperation()
-
-    def __reduce__(self) -> NoReturn:
-        raise UnSupportedAggregateOperation()
+# class ReadOnlyGraphAggregate(ConjunctiveGraph):
+#     """Utility class for treating a set of graphs as a single graph
+#
+#     Only read operations are supported (hence the name). Essentially a
+#     ConjunctiveGraph over an explicit subset of the entire store.
+#     """
+#
+#     def __init__(self, graphs: list[Graph], store: Union[str, Store] = "default"):
+#         if store is not None:
+#             super(ReadOnlyGraphAggregate, self).__init__(store)
+#             Graph.__init__(self, store)
+#             self.__namespace_manager = None
+#
+#         assert (
+#             isinstance(graphs, list)
+#             and graphs
+#             and [g for g in graphs if isinstance(g, Graph)]
+#         ), "graphs argument must be a list of Graphs!!"
+#         self.graphs = graphs
+#
+#     def __repr__(self) -> str:
+#         return "<ReadOnlyGraphAggregate: %s graphs>" % len(self.graphs)
+#
+#     def destroy(self, configuration: str) -> NoReturn:
+#         raise ModificationException()
+#
+#     # Transactional interfaces (optional)
+#     def commit(self) -> NoReturn:
+#         raise ModificationException()
+#
+#     def rollback(self) -> NoReturn:
+#         raise ModificationException()
+#
+#     def open(self, configuration: str, create: bool = False) -> None:
+#         # TODO: is there a use case for this method?
+#         for graph in self.graphs:
+#             # type error: Too many arguments for "open" of "Graph"
+#             # type error: Argument 1 to "open" of "Graph" has incompatible type "ReadOnlyGraphAggregate"; expected "str"  [arg-type]
+#             # type error: Argument 2 to "open" of "Graph" has incompatible type "str"; expected "bool"  [arg-type]
+#             graph.open(self, configuration, create)  # type: ignore[call-arg, arg-type]
+#
+#     # type error: Signature of "close" incompatible with supertype "Graph"
+#     def close(self) -> None:  # type: ignore[override]
+#         for graph in self.graphs:
+#             graph.close()
+#
+#     def add(self, triple: _TripleOrOptionalQuadType) -> NoReturn:
+#         raise ModificationException()
+#
+#     def addN(self, quads: Iterable[_QuadType]) -> NoReturn:  # noqa: N802
+#         raise ModificationException()
+#
+#     # type error: Argument 1 of "remove" is incompatible with supertype "Graph"; supertype defines the argument type as "tuple[Optional[Node], Optional[Node], Optional[Node]]"
+#     def remove(self, triple: _TripleOrOptionalQuadType) -> NoReturn:  # type: ignore[override]
+#         raise ModificationException()
+#
+#     # type error: Signature of "triples" incompatible with supertype "ConjunctiveGraph"
+#     @overload  # type: ignore[override]
+#     def triples(
+#         self,
+#         triple: _TriplePatternType,
+#     ) -> Generator[_TripleType, None, None]: ...
+#
+#     @overload
+#     def triples(
+#         self,
+#         triple: _TriplePathPatternType,
+#     ) -> Generator[_TriplePathType, None, None]: ...
+#
+#     @overload
+#     def triples(
+#         self,
+#         triple: _TripleSelectorType,
+#     ) -> Generator[_TripleOrTriplePathType, None, None]: ...
+#
+#     def triples(
+#         self,
+#         triple: _TripleSelectorType,
+#     ) -> Generator[_TripleOrTriplePathType, None, None]:
+#         s, p, o = triple
+#         for graph in self.graphs:
+#             if isinstance(p, Path):
+#                 for s, o in p.eval(self, s, o):
+#                     yield s, p, o
+#             else:
+#                 for s1, p1, o1 in graph.triples((s, p, o)):
+#                     yield s1, p1, o1
+#
+#     def __contains__(self, triple_or_quad: _TripleOrQuadSelectorType) -> bool:
+#         context = None
+#         if len(triple_or_quad) == 4:
+#             # type error: Tuple index out of range
+#             context = triple_or_quad[3]  # type: ignore [misc, unused-ignore]
+#         for graph in self.graphs:
+#             if context is None or graph.identifier == context.identifier:
+#                 if triple_or_quad[:3] in graph:
+#                     return True
+#         return False
+#
+#     # type error: Signature of "quads" incompatible with supertype "ConjunctiveGraph"
+#     def quads(  # type: ignore[override]
+#         self, triple_or_quad: _TripleOrQuadSelectorType
+#     ) -> Generator[
+#         tuple[_SubjectType, Path | _PredicateType, _ObjectType, _ContextType],
+#         None,
+#         None,
+#     ]:
+#         """Iterate over all the quads in the entire aggregate graph"""
+#         c = None
+#         if len(triple_or_quad) == 4:
+#             s, p, o, c = triple_or_quad
+#         else:
+#             s, p, o = triple_or_quad[:3]
+#
+#         if c is not None:
+#             for graph in [g for g in self.graphs if g == c]:
+#                 for s1, p1, o1 in graph.triples((s, p, o)):
+#                     yield s1, p1, o1, graph
+#         else:
+#             for graph in self.graphs:
+#                 for s1, p1, o1 in graph.triples((s, p, o)):
+#                     yield s1, p1, o1, graph
+#
+#     def __len__(self) -> int:
+#         return sum(len(g) for g in self.graphs)
+#
+#     def __hash__(self) -> NoReturn:
+#         raise UnSupportedAggregateOperation()
+#
+#     def __cmp__(self, other) -> int:
+#         if other is None:
+#             return -1
+#         elif isinstance(other, Graph):
+#             return -1
+#         elif isinstance(other, ReadOnlyGraphAggregate):
+#             return (self.graphs > other.graphs) - (self.graphs < other.graphs)
+#         else:
+#             return -1
+#
+#     def __iadd__(self: _GraphT, other: Iterable[_TripleType]) -> NoReturn:
+#         raise ModificationException()
+#
+#     def __isub__(self: _GraphT, other: Iterable[_TripleType]) -> NoReturn:
+#         raise ModificationException()
+#
+#     # Conv. methods
+#
+#     def triples_choices(
+#         self,
+#         triple: (
+#             tuple[
+#                 list[_SubjectType] | tuple[_SubjectType, ...],
+#                 _PredicateType,
+#                 _ObjectType | None,
+#             ]
+#             | tuple[
+#                 _SubjectType | None,
+#                 list[_PredicateType] | tuple[_PredicateType, ...],
+#                 _ObjectType | None,
+#             ]
+#             | tuple[
+#                 _SubjectType | None,
+#                 _PredicateType,
+#                 list[_ObjectType] | tuple[_ObjectType, ...],
+#             ]
+#         ),
+#         context: _ContextType | None = None,
+#     ) -> Generator[_TripleType, None, None]:
+#         subject, predicate, object_ = triple
+#         for graph in self.graphs:
+#             # type error: Argument 1 to "triples_choices" of "Graph" has incompatible type "tuple[Union[list[Node], Node], Union[Node, list[Node]], Union[Node, list[Node]]]"; expected "Union[tuple[list[Node], Node, Node], tuple[Node, list[Node], Node], tuple[Node, Node, list[Node]]]"
+#             # type error note: unpacking discards type info
+#             choices = graph.triples_choices((subject, predicate, object_))  # type: ignore[arg-type]
+#             for s, p, o in choices:
+#                 yield s, p, o
+#
+#     def qname(self, uri: str) -> str:
+#         if hasattr(self, "namespace_manager") and self.namespace_manager:
+#             return self.namespace_manager.qname(uri)
+#         raise UnSupportedAggregateOperation()
+#
+#     def compute_qname(self, uri: str, generate: bool = True) -> tuple[str, URIRef, str]:
+#         if hasattr(self, "namespace_manager") and self.namespace_manager:
+#             return self.namespace_manager.compute_qname(uri, generate)
+#         raise UnSupportedAggregateOperation()
+#
+#     # type error: Signature of "bind" incompatible with supertype "Graph"
+#     def bind(  # type: ignore[override]
+#         self, prefix: str | None, namespace: Any, override: bool = True  # noqa: F811
+#     ) -> NoReturn:
+#         raise UnSupportedAggregateOperation()
+#
+#     def namespaces(self) -> Generator[tuple[str, URIRef], None, None]:
+#         if hasattr(self, "namespace_manager"):
+#             for prefix, namespace in self.namespace_manager.namespaces():
+#                 yield prefix, namespace
+#         else:
+#             for graph in self.graphs:
+#                 for prefix, namespace in graph.namespaces():
+#                     yield prefix, namespace
+#
+#     def absolutize(self, uri: str, defrag: int = 1) -> NoReturn:
+#         raise UnSupportedAggregateOperation()
+#
+#     # type error: Signature of "parse" incompatible with supertype "ConjunctiveGraph"
+#     def parse(  # type: ignore[override]
+#         self,
+#         source: (
+#             IO[bytes] | TextIO | InputSource | str | bytes | pathlib.PurePath | None
+#         ),
+#         publicID: str | None = None,  # noqa: N803
+#         format: str | None = None,
+#         **args: Any,
+#     ) -> NoReturn:
+#         raise ModificationException()
+#
+#     def n3(self, namespace_manager: NamespaceManager | None = None) -> NoReturn:
+#         raise UnSupportedAggregateOperation()
+#
+#     def __reduce__(self) -> NoReturn:
+#         raise UnSupportedAggregateOperation()
 
 
 @overload
